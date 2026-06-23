@@ -107,39 +107,62 @@ function applySiteSettings(rows) {
 
 function loadSheet() {
   const status = document.getElementById('status');
-  status.textContent = '讀取中…';
+  if (status) status.textContent = '讀取中…';
+
   const oldScript = document.getElementById('sheetJsonp');
   if (oldScript) oldScript.remove();
 
   const callbackName = 'playlistSheetCallback_' + Date.now();
-  const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?gid=' + SHEET_GID + '&tqx=out:json;responseHandler:' + callbackName + '&t=' + Date.now();
+
+  const url =
+    'https://docs.google.com/spreadsheets/d/' +
+    SHEET_ID +
+    '/gviz/tq?gid=' +
+    SHEET_GID +
+    '&headers=0&tqx=out:json;responseHandler:' +
+    callbackName +
+    '&t=' +
+    Date.now();
 
   window[callbackName] = function(response) {
     clearTimeout(sheetTimeout);
+
     try {
-      const rows = response && response.table && response.table.rows ? response.table.rows : [];
-      const headers = rows[0] && rows[0].c ? rows[0].c.map(function(_, i) { return cell(rows[0], i); }) : [];
+      if (response && response.status && response.status !== 'ok') {
+        showSheetError('試算表讀取失敗，請確認 Google 試算表權限是「知道連結的任何人可檢視」。');
+        return;
+      }
+
+      const rows =
+        response && response.table && response.table.rows
+          ? response.table.rows
+          : [];
 
       applySiteSettings(rows);
-
-      const titleIdx = findColumn(headers, ['歌名', '歌曲', '曲名', 'title'], 0);
-      const artistIdx = findColumn(headers, ['歌手', '演唱', '藝人', 'artist'], 1);
-      const tagIdx = findColumn(headers, ['標籤', '歌曲標籤', '分類標籤'], -1);
-      const categoryIdx = tagIdx >= 0 ? tagIdx : findColumn(headers, ['分類', '歌曲分類', '類型', 'category'], 2);
-      const linkIdx = findColumn(headers, ['歌曲連結', '連結', 'link', 'url'], -1);
 
       const loadedSongs = [];
       const masterTags = [];
 
-      rows.slice(1).forEach(function(row) {
-        const title = cell(row, titleIdx);
-        const artist = cell(row, artistIdx);
-        const category = cell(row, categoryIdx);
-        const link = linkIdx >= 0 ? cell(row, linkIdx) : '';
-        const looksLikeHeader = ['歌名', '歌曲', '曲名', 'title'].includes(title.toLowerCase());
+      rows.forEach(function(row) {
+        const title = cell(row, 0);        // A 欄：歌名
+        const artist = cell(row, 1);       // B 欄：歌手
+        const category = cell(row, 2);     // C 欄：歌曲分類
+        const link = cell(row, 3);         // D 欄：歌曲連結
+        const masterTagCell = cell(row, 5); // F 欄：上方分類按鈕
+
+        const looksLikeHeader = ['歌名', '歌曲', '曲名', 'title'].includes(
+          title.toLowerCase()
+        );
+
+        // F 欄只拿來做上方分類按鈕，不影響每首歌本身分類。
+        // 這裡不再 rows.slice(1)，避免第一首歌被跳過。
+        if (!looksLikeHeader) {
+          parseTags(masterTagCell).forEach(function(t) {
+            masterTags.push(t);
+          });
+        }
 
         if (title && !looksLikeHeader) {
-          parseTags(category).forEach(function(t) { masterTags.push(t); });
           loadedSongs.push({
             title: title,
             artist: artist || '未填歌手',
@@ -150,21 +173,34 @@ function loadSheet() {
       });
 
       songs = loadedSongs;
-      tags = Array.from(new Set(masterTags));
-      if (!tags.length) {
+
+      // 優先使用 F 欄作為上方分類按鈕來源。
+      // 如果 F 欄沒有資料，才退回使用 C 欄歌曲分類。
+      if (masterTags.length) {
+        tags = Array.from(new Set(masterTags));
+      } else {
         const fromSongs = [];
-        songs.forEach(function(s) { parseTags(s.category).forEach(function(t) { fromSongs.push(t); }); });
+
+        songs.forEach(function(s) {
+          parseTags(s.category).forEach(function(t) {
+            fromSongs.push(t);
+          });
+        });
+
         tags = Array.from(new Set(fromSongs));
       }
 
-      status.textContent = '';
+      if (status) status.textContent = '';
+
       renderTags();
       renderSongs();
+
     } catch (err) {
       console.error(err);
-      showSheetError('試算表格式解析失敗，請確認歌名、歌手、標籤欄位是否存在。');
+      showSheetError('試算表格式解析失敗，請確認 A欄歌名、B欄歌手、C欄分類、D欄連結、F欄標籤。');
     } finally {
       delete window[callbackName];
+
       const s = document.getElementById('sheetJsonp');
       if (s) s.remove();
     }
@@ -173,16 +209,21 @@ function loadSheet() {
   const script = document.createElement('script');
   script.id = 'sheetJsonp';
   script.src = url;
+
   script.onerror = function() {
     clearTimeout(sheetTimeout);
     showSheetError('讀取不到試算表，請確認共用權限是「知道連結的任何人可檢視」。');
     delete window[callbackName];
   };
+
   document.body.appendChild(script);
 
   sheetTimeout = setTimeout(function() {
     showSheetError('讀取試算表逾時，請重新整理頁面或確認試算表權限。');
     delete window[callbackName];
+
+    const s = document.getElementById('sheetJsonp');
+    if (s) s.remove();
   }, 12000);
 }
 
@@ -274,10 +315,14 @@ function renderSongs() {
     };
 
     card.append(title, artist, cat, copy);
+
     if (s.link) {
-      card.addEventListener('dblclick', function() { window.open(s.link, '_blank', 'noopener,noreferrer'); });
+      card.addEventListener('dblclick', function() {
+        window.open(s.link, '_blank', 'noopener,noreferrer');
+      });
       card.title = '雙擊開啟歌曲連結';
     }
+
     grid.appendChild(card);
   });
 }
